@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">room-expense-split</string>
+    <string name="title_activity_main">room-expense-split</string>
+    <string name="package_name">com.roomexpensesplit.app</string>
+    <string name="custom_url_scheme">com.roomexpensesplit.app</string>
+</resources>
