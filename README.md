@@ -148,3 +148,4 @@ components/
   Panels.jsx                 → overview, members, deposits, grocery, ledger
 RoomExpenseSplit.jsx         → the room dashboard
 ```
+# Room-Expense-Splitter
