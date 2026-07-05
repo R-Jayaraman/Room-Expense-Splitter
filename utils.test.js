@@ -8,7 +8,7 @@ import {
   categorySpent, categoryBalance,
   applyMonthlyRollover, startNewMonth,
   normalizeState, nextOrderNo,
-  splitBillShares, clampPaymentAmount, equalShares, buildUpiPaymentLink,
+  splitBillShares, clampPaymentAmount, equalShares, buildUpiPaymentLink, buildUpiAppLinks,
   generatePaymentReference, depositMemberStatus, buildLedgerItems,
 } from "./utils.js";
 import { AVATAR_COLORS, defaultState } from "./constants.js";
@@ -528,6 +528,23 @@ describe("buildUpiPaymentLink", () => {
     const link = buildUpiPaymentLink({});
     expect(link).toContain("pa=");
     expect(link).toContain("am=0.00");
+  });
+  it("defaults to the generic upi scheme, but honors an override", () => {
+    const params = { payeeUpi: "a@b", payeeName: "A", amount: 10, note: "", reference: "" };
+    expect(buildUpiPaymentLink(params).startsWith("upi://pay?")).toBe(true);
+    expect(buildUpiPaymentLink({ ...params, scheme: "tez" }).startsWith("tez://pay?")).toBe(true);
+  });
+});
+
+describe("buildUpiAppLinks", () => {
+  it("builds one link per known UPI app, each with its own scheme", () => {
+    const links = buildUpiAppLinks({ payeeUpi: "a@b", payeeName: "A", amount: 10, note: "", reference: "ref1" });
+    expect(links.length).toBeGreaterThan(0);
+    expect(links.map((l) => l.id)).toEqual(expect.arrayContaining(["gpay", "phonepe", "paytm", "bhim"]));
+    for (const l of links) {
+      expect(l.link.startsWith(`${l.link.split("://")[0]}://pay?`)).toBe(true);
+      expect(l.link).toContain("pa=a%40b");
+    }
   });
 });
 

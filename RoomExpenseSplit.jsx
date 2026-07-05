@@ -5,10 +5,10 @@ import {
   formatINR, normalizeState, totalCollected, uid, round2, netPaidBy,
   currentPeriod, periodLabel, applyMonthlyRollover, categoryBalance, categorySpent, nextOrderNo,
   startNewMonth as startNewMonthState, isValidUpi, clampPaymentAmount, equalShares, buildUpiPaymentLink,
-  generatePaymentReference, paymentBreakdown,
+  buildUpiAppLinks, generatePaymentReference, paymentBreakdown,
 } from "./utils";
 import { AppBar, GlobalStyle, Aurora } from "./components/Shared";
-import { Overview, MembersPanel, DepositPanel, GroceryPanel, LedgerPanel, ExpenseModal, ConfirmModal, SettingsModal, RoomInfoModal } from "./components/Panels";
+import { Overview, MembersPanel, DepositPanel, GroceryPanel, LedgerPanel, ExpenseModal, ConfirmModal, SettingsModal, RoomInfoModal, UpiAppChooserModal } from "./components/Panels";
 import { CharacterNotification } from "./components/CharacterNotification";
 import { subscribeRoom, saveRoomState, deleteRoom, transferAdmin, getRoomPassword, setRoomPassword as saveRoomPassword, sendReminderPush } from "./firebase";
 import { isEmailConfigured, sendReminderEmail } from "./email";
@@ -239,6 +239,13 @@ export default function RoomExpenseSplit({ user, roomId, initialTab, onLeave, on
   // app for the UPI app and came back.
   const paymentRefKey = (cat) => `rex-payref:${roomId}:${cat}:${currentUserId}`;
 
+  // iOS has no OS-level chooser for a shared "upi://" scheme — Safari just
+  // hands it to whichever app claims it (observed: WhatsApp Pay instead of
+  // the intended payment app). So on iOS we show our own chooser using each
+  // app's unambiguous scheme instead of navigating straight there.
+  const [upiChooser, setUpiChooser] = useState(null);
+  const isIOS = () => typeof navigator !== "undefined" && /iPad|iPhone|iPod/.test(navigator.userAgent);
+
   // Navigation only — no state write. The status change happens once the
   // member comes back and confirms via "I've Paid" (markDepositPaid below).
   const payNowDeposit = (cat) => {
@@ -250,11 +257,12 @@ export default function RoomExpenseSplit({ user, roomId, initialTab, onLeave, on
     if (!adminMember || !isValidUpi(adminMember.upiId)) return showToast("Admin hasn't set a valid UPI ID yet", "danger");
     const reference = generatePaymentReference();
     try { window.localStorage.setItem(paymentRefKey(cat), reference); } catch {}
-    const link = buildUpiPaymentLink({
+    const linkParams = {
       payeeUpi: adminMember.upiId, payeeName: adminMember.name, amount: remaining,
       note: `${CATEGORY_META[cat].label} deposit`, reference,
-    });
-    window.location.href = link;
+    };
+    if (isIOS()) { setUpiChooser(buildUpiAppLinks(linkParams)); return; }
+    window.location.href = buildUpiPaymentLink(linkParams);
   };
 
   // Member confirms they've completed the UPI payment — moves them into
@@ -492,6 +500,11 @@ export default function RoomExpenseSplit({ user, roomId, initialTab, onLeave, on
       {roomInfoOpen && (
         <RoomInfoModal roomName={roomName} roomId={roomId} isAdmin={isAdmin} roomPassword={roomPassword}
           onSetRoomPassword={handleSetRoomPassword} onClose={() => setRoomInfoOpen(false)} />
+      )}
+      {upiChooser && (
+        <UpiAppChooserModal options={upiChooser}
+          onSelect={(opt) => { window.location.href = opt.link; setUpiChooser(null); }}
+          onClose={() => setUpiChooser(null)} />
       )}
       {confirmDeleteRoomOpen && (
         <ConfirmModal title="Delete this room?"

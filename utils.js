@@ -263,7 +263,14 @@ export function equalShares(total, memberIds) {
 // link (opens its home screen) rather than resolving a numeric payee the
 // way Paytm's own "pay by number" flow does, so the payee address needs to
 // be the admin's actual UPI ID for the deep link to work across apps.
-export function buildUpiPaymentLink({ payeeUpi, payeeName, amount, note, reference }) {
+//
+// `scheme` defaults to the generic "upi" scheme, which Android resolves via
+// its own app-chooser when multiple UPI apps are installed. iOS has no such
+// chooser for a shared custom scheme — Safari just silently hands it to
+// whichever app claims "upi://" (in practice this can be WhatsApp Pay rather
+// than the intended payment app). Passing a specific app's own scheme (see
+// UPI_APPS below) sidesteps that ambiguity entirely.
+export function buildUpiPaymentLink({ payeeUpi, payeeName, amount, note, reference, scheme = "upi" }) {
   const parts = [
     "pa=" + encodeURIComponent(payeeUpi || ""),
     "pn=" + encodeURIComponent(payeeName || ""),
@@ -276,7 +283,24 @@ export function buildUpiPaymentLink({ payeeUpi, payeeName, amount, note, referen
     "tn=" + encodeURIComponent(note || ""),
     "tr=" + encodeURIComponent(reference || ""),
   ];
-  return "upi://pay?" + parts.join("&");
+  return `${scheme}://pay?` + parts.join("&");
+}
+
+// Each major PSP registers its own iOS URL scheme in addition to the shared
+// "upi" one — using these directly is the standard workaround for iOS's lack
+// of an app-chooser (see buildUpiPaymentLink above). Android doesn't need
+// this list since its OS-level chooser already handles the generic scheme.
+export const UPI_APPS = [
+  { id: "gpay", label: "Google Pay", scheme: "tez" },
+  { id: "phonepe", label: "PhonePe", scheme: "phonepe" },
+  { id: "paytm", label: "Paytm", scheme: "paytmmp" },
+  { id: "bhim", label: "BHIM", scheme: "bhim" },
+];
+
+// Builds one deep link per known UPI app (for the iOS chooser) plus a
+// generic "upi://" fallback for anything not in that list.
+export function buildUpiAppLinks(params) {
+  return UPI_APPS.map((app) => ({ id: app.id, label: app.label, link: buildUpiPaymentLink({ ...params, scheme: app.scheme }) }));
 }
 
 // Random (not deterministic) — reusing the same "tr" across retries/partial

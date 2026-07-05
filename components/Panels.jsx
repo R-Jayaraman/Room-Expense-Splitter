@@ -419,6 +419,33 @@ export function ConfirmModal({ title, message, confirmLabel = "Confirm", danger,
   );
 }
 
+/* --------------------------- UPI app chooser modal --------------------------- */
+// iOS has no OS-level disambiguation for a shared "upi://" scheme, so instead
+// of a blind redirect we let the member pick which installed app to open —
+// each option links via that app's own unambiguous scheme (see UPI_APPS).
+export function UpiAppChooserModal({ options, onSelect, onClose }) {
+  return (
+    <div className="rex-modal-overlay" onClick={onClose}>
+      <div className="rex-modal-sheet" onClick={(e) => e.stopPropagation()}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
+          <div style={{ fontSize: 17, fontWeight: 800 }}>Pay with</div>
+          <button onClick={onClose} aria-label="Close" style={{ background: T.subtleBg, border: "none", borderRadius: 8, width: 30, height: 30, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: T.inkSoft }}><X size={16} /></button>
+        </div>
+        <div style={{ fontSize: 13, color: T.inkSoft, marginBottom: 14, lineHeight: 1.5 }}>
+          Choose the UPI app to pay with — iOS can't auto-detect this the way Android does.
+        </div>
+        <div style={{ display: "grid", gap: 8 }}>
+          {options.map((opt) => (
+            <button key={opt.id} className="rex-btn rex-btn-ghost" style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 14px", fontSize: 14.5, fontWeight: 700 }} onClick={() => onSelect(opt)}>
+              <Smartphone size={16} /> {opt.label}
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ------------------------------ Settings modal ------------------------------ */
 export function SettingsModal({ member, email, onSave, onClose, isAdmin, onDeleteRoom, requireUpi }) {
   const [name, setName] = useState(member.name || "");
