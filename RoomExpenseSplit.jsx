@@ -4,15 +4,16 @@ import { CATEGORY_META, defaultState, T } from "./constants";
 import {
   formatINR, normalizeState, totalCollected, uid, round2, netPaidBy,
   currentPeriod, periodLabel, applyMonthlyRollover, categoryBalance, categorySpent, nextOrderNo,
-  startNewMonth as startNewMonthState,
+  startNewMonth as startNewMonthState, isValidUpi, clampPaymentAmount, equalShares, buildUpiPaymentLink,
+  generatePaymentReference, paymentBreakdown,
 } from "./utils";
 import { AppBar, GlobalStyle, Aurora } from "./components/Shared";
 import { Overview, MembersPanel, DepositPanel, GroceryPanel, LedgerPanel, ExpenseModal, ConfirmModal, SettingsModal, RoomInfoModal } from "./components/Panels";
 import { CharacterNotification } from "./components/CharacterNotification";
-import { subscribeRoom, saveRoomState, deleteRoom, transferAdmin, getRoomPassword, setRoomPassword as saveRoomPassword } from "./firebase";
+import { subscribeRoom, saveRoomState, deleteRoom, transferAdmin, getRoomPassword, setRoomPassword as saveRoomPassword, sendReminderPush } from "./firebase";
 import { isEmailConfigured, sendReminderEmail } from "./email";
 
-export default function RoomExpenseSplit({ user, roomId, onLeave, onLogout, theme, onToggleTheme }) {
+export default function RoomExpenseSplit({ user, roomId, initialTab, onLeave, onLogout, theme, onToggleTheme }) {
   const currentUserId = user.uid;
 
   const [state, setState] = useState(defaultState);
@@ -20,7 +21,7 @@ export default function RoomExpenseSplit({ user, roomId, onLeave, onLogout, them
   const [roomPassword, setRoomPassword] = useState(null); // null = not fetched yet
   const [loaded, setLoaded] = useState(false);
   const [saveError, setSaveError] = useState(false);
-  const [activeTab, setActiveTab] = useState("overview");
+  const [activeTab, setActiveTab] = useState(initialTab || "overview");
   const [toast, setToast] = useState(null);
   const [expenseModalOpen, setExpenseModalOpen] = useState(false);
   const [confirmNewMonthOpen, setConfirmNewMonthOpen] = useState(false);
@@ -95,6 +96,9 @@ export default function RoomExpenseSplit({ user, roomId, onLeave, onLogout, them
   const adminName = meta.adminName;
   const memberName = (id) => members.find((m) => m.id === id)?.name || "Unknown";
   const perMemberShare = (cat) => { const c = members.length; return c ? (state.deposits[cat]?.total || 0) / c : 0; };
+  // Exact per-member due, unlike perMemberShare's flat average — see
+  // equalShares' doc comment for why the average alone can undercollect.
+  const memberShares = (cat) => equalShares(state.deposits[cat]?.total || 0, members.map((m) => m.id));
   const collectedForCat = (cat) => totalCollected(state.deposits[cat]);
   const periodText = periodLabel(state.period || currentPeriod());
 
@@ -124,7 +128,11 @@ export default function RoomExpenseSplit({ user, roomId, onLeave, onLogout, them
     updateState((prev) => {
       const nextMembers = prev.members.filter((m) => m.id !== id);
       const deposits = {};
-      for (const cat of Object.keys(prev.deposits)) deposits[cat] = { ...prev.deposits[cat], history: prev.deposits[cat].history.filter((h) => h.memberId !== id) };
+      for (const cat of Object.keys(prev.deposits)) {
+        const dep = prev.deposits[cat];
+        const { [id]: _removedVerification, ...restVerification } = dep.verification || {};
+        deposits[cat] = { ...dep, history: dep.history.filter((h) => h.memberId !== id), verification: restVerification };
+      }
       return { ...prev, members: nextMembers, deposits, transactions: prev.transactions.filter((t) => t.paidBy !== id && t.refundTo !== id) };
     });
     showToast(mname + " removed");
@@ -157,6 +165,11 @@ export default function RoomExpenseSplit({ user, roomId, onLeave, onLogout, them
   };
 
   const currentMember = members.find((m) => m.id === currentUserId);
+  const adminMember = members.find((m) => m.id === meta.adminUid);
+  // First time this member is seen without a (valid) UPI ID — force them
+  // through Settings before they can use the room, whether they just created
+  // it (admin) or joined it (member). They can still edit it later.
+  const needsUpi = Boolean(currentMember) && !isValidUpi(currentMember.upiId);
 
   const openSettings = () => setSettingsOpen(true);
 
@@ -217,20 +230,85 @@ export default function RoomExpenseSplit({ user, roomId, onLeave, onLogout, them
     showToast(CATEGORY_META[cat].full + " set to " + formatINR(val), "success");
   };
 
-  const addPayment = (cat, memberId, rawIncrement) => {
-    if (!isAdmin && memberId !== currentUserId) return showToast("You can only record your own payment", "danger");
-    const share = perMemberShare(cat);
-    if (share <= 0) return showToast(`Set the ${CATEGORY_META[cat].label.toLowerCase()} amount first`, "danger");
-    const increment = parseFloat(rawIncrement);
-    if (!Number.isFinite(increment) || increment <= 0) return showToast("Enter a valid amount", "danger");
-    updateState((prev) => {
-      const deposit = prev.deposits[cat];
-      const current = netPaidBy(deposit, prev.transactions, cat, memberId);
-      const clamped = round2(Math.min(increment, Math.max(0, share - current)));
-      if (clamped <= 0) return prev;
-      const entry = { id: uid(), memberId, amount: clamped, date: new Date().toISOString() };
-      return { ...prev, deposits: { ...prev.deposits, [cat]: { ...deposit, history: [entry, ...deposit.history] } } };
+  // A fresh "tr" is generated per Pay Now click (not derived deterministically)
+  // since some PSPs read a repeated "tr" as a duplicate/replayed transaction
+  // and bounce it — that reuse is the likely cause behind "technical glitch"
+  // / "retry with a smaller amount" failures on retries. It's stashed here
+  // (device-local, not room state) so "I've Paid" can report the same code
+  // the bank narration will actually show, even after the member left the
+  // app for the UPI app and came back.
+  const paymentRefKey = (cat) => `rex-payref:${roomId}:${cat}:${currentUserId}`;
+
+  // Navigation only — no state write. The status change happens once the
+  // member comes back and confirms via "I've Paid" (markDepositPaid below).
+  const payNowDeposit = (cat) => {
+    if (isAdmin) return; // per spec: only non-admin members pay via UPI
+    const deposit = state.deposits[cat];
+    const share = memberShares(cat)[currentUserId] || 0;
+    const remaining = paymentBreakdown(netPaidBy(deposit, state.transactions, cat, currentUserId), share).remaining;
+    if (remaining <= 0) return;
+    if (!adminMember || !isValidUpi(adminMember.upiId)) return showToast("Admin hasn't set a valid UPI ID yet", "danger");
+    const reference = generatePaymentReference();
+    try { window.localStorage.setItem(paymentRefKey(cat), reference); } catch {}
+    const link = buildUpiPaymentLink({
+      payeeUpi: adminMember.upiId, payeeName: adminMember.name, amount: remaining,
+      note: `${CATEGORY_META[cat].label} deposit`, reference,
     });
+    window.location.href = link;
+  };
+
+  // Member confirms they've completed the UPI payment — moves them into
+  // "pending_verification" until the admin confirms it landed.
+  const markDepositPaid = (cat) => {
+    if (isAdmin) return;
+    const deposit = state.deposits[cat];
+    if (deposit.verification && deposit.verification[currentUserId]) return; // already awaiting verification
+    const share = memberShares(cat)[currentUserId] || 0;
+    const remaining = paymentBreakdown(netPaidBy(deposit, state.transactions, cat, currentUserId), share).remaining;
+    if (remaining <= 0) return;
+    let reference;
+    try { reference = window.localStorage.getItem(paymentRefKey(cat)); } catch {}
+    if (!reference) reference = generatePaymentReference();
+    try { window.localStorage.removeItem(paymentRefKey(cat)); } catch {}
+    updateState((prev) => ({
+      ...prev,
+      deposits: {
+        ...prev.deposits,
+        [cat]: { ...prev.deposits[cat], verification: { ...prev.deposits[cat].verification, [currentUserId]: { amount: remaining, reference, requestedAt: new Date().toISOString() } } },
+      },
+    }));
+    showToast("Marked as paid — waiting for admin to verify", "default");
+  };
+
+  // Admin's one-click resolution for a member's row. If the member already
+  // claimed they paid (verification entry present), this finalizes exactly
+  // that claimed amount — the "Verify Payment" step from the spec, just
+  // labeled "Mark as Paid" to match the admin's other manual-entry action.
+  // If there's no claim yet, it's the admin directly recording the full
+  // remaining share themselves (e.g. cash handed over in person).
+  const adminMarkPaid = (cat, memberId) => {
+    if (!isAdmin) return showToast("Only the admin can do this", "danger");
+    const deposit = state.deposits[cat];
+    const claim = deposit.verification && deposit.verification[memberId];
+    if (claim) {
+      updateState((prev) => {
+        const dep = prev.deposits[cat];
+        const { [memberId]: _resolved, ...restVerification } = dep.verification;
+        const entry = { id: uid(), memberId, amount: claim.amount, date: new Date().toISOString() };
+        return { ...prev, deposits: { ...prev.deposits, [cat]: { ...dep, history: [entry, ...dep.history], verification: restVerification } } };
+      });
+      showToast(`Marked ${memberName(memberId)}'s payment as paid`, "success");
+      return;
+    }
+    const share = memberShares(cat)[memberId] || 0;
+    const remaining = paymentBreakdown(netPaidBy(deposit, state.transactions, cat, memberId), share).remaining;
+    if (remaining <= 0) return;
+    updateState((prev) => {
+      const dep = prev.deposits[cat];
+      const entry = { id: uid(), memberId, amount: remaining, date: new Date().toISOString() };
+      return { ...prev, deposits: { ...prev.deposits, [cat]: { ...dep, history: [entry, ...dep.history] } } };
+    });
+    showToast(`Marked ${memberName(memberId)}'s payment as paid`, "success");
   };
 
   // If the admin lowers a total after members already paid the old share, this
@@ -241,7 +319,7 @@ export default function RoomExpenseSplit({ user, roomId, onLeave, onLogout, them
   const settleRefund = (cat, memberId) => {
     if (!isAdmin) return showToast("Only the admin can settle refunds", "danger");
     const deposit = state.deposits[cat];
-    const share = members.length ? (deposit.total || 0) / members.length : 0;
+    const share = memberShares(cat)[memberId] || 0;
     const credit = round2(Math.max(0, netPaidBy(deposit, state.transactions, cat, memberId) - share));
     if (credit <= 0) return showToast("Nothing to refund", "default");
     const entry = {
@@ -255,12 +333,20 @@ export default function RoomExpenseSplit({ user, roomId, onLeave, onLogout, them
 
   const remindAll = async (cat) => {
     if (!isAdmin) return;
-    if (!emailOn) return showToast("Email isn't set up yet — see the README", "danger");
-    const share = perMemberShare(cat);
+    const shares = memberShares(cat);
     const unpaid = state.members
-      .map((m) => ({ member: m, due: Math.max(0, share - netPaidBy(state.deposits[cat], state.transactions, cat, m.id)) }))
+      .map((m) => ({ member: m, due: Math.max(0, (shares[m.id] || 0) - netPaidBy(state.deposits[cat], state.transactions, cat, m.id)) }))
       .filter((x) => x.due > 0.01);
     if (unpaid.length === 0) return showToast("Everyone has already paid", "default");
+
+    // Push reminders are best-effort and silent — the backend just skips
+    // members with no registered device token, and this whole call is a
+    // no-op if the Cloud Function isn't deployed yet.
+    Promise.allSettled(
+      unpaid.map((x) => sendReminderPush({ memberUid: x.member.id, roomId, roomName, category: cat, amountDue: x.due }))
+    ).catch(() => {});
+
+    if (!emailOn) return showToast("Email isn't set up yet — see the README", "danger");
     const withEmail = unpaid.filter((x) => x.member.email);
     if (withEmail.length === 0) return showToast("None of the unpaid members have an email on file", "danger");
     showToast(`Sending reminders to ${withEmail.length} member${withEmail.length === 1 ? "" : "s"}…`);
@@ -293,6 +379,18 @@ export default function RoomExpenseSplit({ user, roomId, onLeave, onLogout, them
   const deleteTransaction = (id) => {
     if (!isAdmin) return showToast("Only the admin can edit expenses", "danger");
     updateState((prev) => ({ ...prev, transactions: prev.transactions.filter((t) => t.id !== id) }));
+  };
+
+  // Rolls back a confirmed deposit payment straight from the Ledger — the
+  // member's paid amount (and status) reverts immediately since it's derived
+  // from deposit.history, not stored redundantly anywhere else.
+  const deleteDepositPayment = (cat, historyId) => {
+    if (!isAdmin) return showToast("Only the admin can edit the ledger", "danger");
+    updateState((prev) => ({
+      ...prev,
+      deposits: { ...prev.deposits, [cat]: { ...prev.deposits[cat], history: prev.deposits[cat].history.filter((h) => h.id !== historyId) } },
+    }));
+    showToast("Payment removed", "default");
   };
 
   const startNewMonth = () => {
@@ -337,21 +435,23 @@ export default function RoomExpenseSplit({ user, roomId, onLeave, onLogout, them
       </div></nav>
 
       <main className="rex-container"><div className="rex-fade" key={activeTab}>
-        {activeTab === "overview" && <Overview state={state} perMemberShare={perMemberShare} setActiveTab={setActiveTab} periodText={periodText} grocery={balanceStats("grocery")} />}
+        {activeTab === "overview" && <Overview state={state} shares={memberShares} setActiveTab={setActiveTab} periodText={periodText} grocery={balanceStats("grocery")} />}
         {activeTab === "members" && <MembersPanel members={members} isAdmin={isAdmin} currentUserId={currentUserId} adminUid={meta.adminUid} roomId={roomId} removeMember={removeMember} makeAdmin={makeAdmin} />}
         {(activeTab === "rent" || activeTab === "electricity") && (
           <DepositPanel cat={activeTab} state={state} isAdmin={isAdmin} currentUserId={currentUserId} canEdit={canEditTotal()} lockReason={lockReason()} periodText={periodText}
-            depositDrafts={depositDrafts} setDepositDrafts={setDepositDrafts} setDepositTotal={setDepositTotal} addPayment={addPayment} remindAll={remindAll} settleRefund={settleRefund}
-            perMemberShare={perMemberShare(activeTab)} collected={collectedForCat(activeTab)} memberName={memberName} />
+            depositDrafts={depositDrafts} setDepositDrafts={setDepositDrafts} setDepositTotal={setDepositTotal} remindAll={remindAll} settleRefund={settleRefund}
+            onPayNow={() => payNowDeposit(activeTab)} onMarkPaid={() => markDepositPaid(activeTab)} onAdminMarkPaid={(memberId) => adminMarkPaid(activeTab, memberId)}
+            perMemberShare={perMemberShare(activeTab)} shares={memberShares(activeTab)} collected={collectedForCat(activeTab)} />
         )}
         {activeTab === "grocery" && (
           <GroceryPanel state={state} isAdmin={isAdmin} currentUserId={currentUserId} canEdit={canEditTotal()} lockReason={lockReason()} periodText={periodText}
-            depositDrafts={depositDrafts} setDepositDrafts={setDepositDrafts} setDepositTotal={setDepositTotal} addPayment={addPayment} remindAll={remindAll} settleRefund={settleRefund}
-            perMemberShare={perMemberShare("grocery")} collected={collectedForCat("grocery")} memberName={memberName} grocery={balanceStats("grocery")} />
+            depositDrafts={depositDrafts} setDepositDrafts={setDepositDrafts} setDepositTotal={setDepositTotal} remindAll={remindAll} settleRefund={settleRefund}
+            onPayNow={() => payNowDeposit("grocery")} onMarkPaid={() => markDepositPaid("grocery")} onAdminMarkPaid={(memberId) => adminMarkPaid("grocery", memberId)}
+            perMemberShare={perMemberShare("grocery")} shares={memberShares("grocery")} collected={collectedForCat("grocery")} grocery={balanceStats("grocery")} />
         )}
         {activeTab === "ledger" && (
           <LedgerPanel state={state} isAdmin={isAdmin} balances={{ rent: balanceStats("rent"), electricity: balanceStats("electricity"), grocery: balanceStats("grocery") }}
-            periodText={periodText} memberName={memberName} deleteTransaction={deleteTransaction}
+            periodText={periodText} memberName={memberName} deleteTransaction={deleteTransaction} deleteDepositPayment={deleteDepositPayment}
             openExpenseModal={() => { if (!isAdmin) return showToast("Only the admin can record expenses", "danger"); setExpenseCategory("grocery"); setExpensePaidBy(""); setExpenseModalOpen(true); }}
             onStartNewMonth={() => { if (!isAdmin) return showToast("Only the admin can start a new month", "danger"); setConfirmNewMonthOpen(true); }} />
         )}
@@ -382,12 +482,12 @@ export default function RoomExpenseSplit({ user, roomId, onLeave, onLogout, them
       )}
       {pendingMakeAdmin && (
         <ConfirmModal title={`Make ${pendingMakeAdmin.name} the admin?`}
-          message={`${pendingMakeAdmin.name} will get full admin rights — setting bills, recording expenses, and managing members. You'll become a regular member and lose those rights.`}
+          message={`${pendingMakeAdmin.name} will get full admin rights — setting deposit totals, recording expenses, and managing members. You'll become a regular member and lose those rights.`}
           confirmLabel="Make admin" onConfirm={confirmMakeAdmin} onClose={() => setPendingMakeAdmin(null)} />
       )}
-      {settingsOpen && currentMember && (
+      {(settingsOpen || needsUpi) && currentMember && (
         <SettingsModal member={currentMember} email={user.email} onSave={updateProfile} onClose={() => setSettingsOpen(false)}
-          isAdmin={isAdmin} onDeleteRoom={requestDeleteRoom} />
+          isAdmin={isAdmin} onDeleteRoom={requestDeleteRoom} requireUpi={needsUpi} />
       )}
       {roomInfoOpen && (
         <RoomInfoModal roomName={roomName} roomId={roomId} isAdmin={isAdmin} roomPassword={roomPassword}

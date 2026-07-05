@@ -379,6 +379,7 @@ export function StatusPill({ status }) {
   const cfg = {
     paid: { bg: T.successSoft, fg: T.success, Icon: Check, label: "Paid" },
     partial: { bg: T.warningSoft, fg: T.warning, Icon: Clock, label: "Partial" },
+    pending_verification: { bg: T.warningSoft, fg: T.warning, Icon: Clock, label: "Pending Verification" },
     pending: { bg: T.dangerSoft, fg: T.danger, Icon: Clock, label: "Pending" },
   }[status] || { bg: T.dangerSoft, fg: T.danger, Icon: Clock, label: "Pending" };
   const Icon = cfg.Icon;

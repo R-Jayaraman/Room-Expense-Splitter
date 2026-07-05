@@ -1,9 +1,9 @@
 import React, { useState } from "react";
 import {
-  Users, Plus, Trash2, Bell, Check, X, Receipt, ChevronRight, Lock, Crown, Mail, Info, RotateCcw, Eye, EyeOff, Pencil, ShoppingCart,
+  Users, Plus, Trash2, Bell, Check, X, Receipt, ChevronRight, Lock, Crown, Mail, Info, RotateCcw, Eye, EyeOff, Pencil, ShoppingCart, Smartphone,
 } from "lucide-react";
 import { CATEGORY_META, MAX_DEPOSIT, MAX_DESC_LENGTH, T } from "../constants";
-import { netPaidBy, formatINR, paymentStatus, paymentBreakdown, totalCollected, isValidMobile } from "../utils";
+import { netPaidBy, formatINR, paymentBreakdown, depositMemberStatus, totalCollected, isValidMobile, isValidUpi, buildLedgerItems } from "../utils";
 import { Avatar, ProgressBar, SectionHeading, StatusPill } from "./Shared";
 
 function YouTag() {
@@ -11,7 +11,7 @@ function YouTag() {
 }
 
 /* --------------------------------- Overview --------------------------------- */
-export function Overview({ state, perMemberShare, setActiveTab, periodText, grocery }) {
+export function Overview({ state, shares, setActiveTab, periodText, grocery }) {
   if (state.members.length === 0) {
     return (
       <div className="rex-card" style={{ textAlign: "center", padding: "44px 24px" }}>
@@ -36,9 +36,9 @@ export function Overview({ state, perMemberShare, setActiveTab, periodText, groc
           const meta = CATEGORY_META[cat];
           const Icon = meta.icon;
           const total = state.deposits[cat].total;
-          const share = perMemberShare(cat);
+          const catShares = shares(cat);
           const collected = totalCollected(state.deposits[cat]);
-          const fullyPaidCount = state.members.filter((m) => paymentStatus(netPaidBy(state.deposits[cat], state.transactions, cat, m.id), share) === "paid").length;
+          const fullyPaidCount = state.members.filter((m) => depositMemberStatus(state.deposits[cat], state.transactions, cat, m.id, catShares[m.id] || 0) === "paid").length;
           const pct = total > 0 ? Math.min(100, Math.round((collected / total) * 100)) : 0;
           const allSettled = total > 0 && fullyPaidCount === state.members.length;
           return (
@@ -194,31 +194,12 @@ function DepositSetupCard({ meta, total, canEdit, lockReason, draft, setDraft, o
   );
 }
 
-function AddPaymentControl({ remaining, onAdd }) {
-  const [value, setValue] = useState("");
-  const amt = parseFloat(value);
-  const isValid = Number.isFinite(amt) && amt > 0 && amt <= remaining + 0.001;
-  const exceeds = Number.isFinite(amt) && amt > remaining;
-  const submit = () => { if (!isValid) return; onAdd(amt); setValue(""); };
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 4, alignItems: "flex-end" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-        <input className="rex-input rex-pay-input" type="number" min="0" max={remaining} placeholder="Add ₹" value={value}
-          onChange={(e) => setValue(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && isValid) submit(); }}
-          style={{ borderColor: exceeds ? T.danger : undefined }} />
-        <button className="rex-btn" onClick={submit} disabled={!isValid} title={exceeds ? "Amount exceeds what's left" : "Confirm this payment"}
-          style={{ background: isValid ? T.success : T.border, color: isValid ? "#fff" : T.muted, border: "none", borderRadius: 8, width: 32, height: 32, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, cursor: isValid ? "pointer" : "not-allowed" }}>
-          <Check size={16} strokeWidth={2.6} />
-        </button>
-      </div>
-      {exceeds && <span style={{ fontSize: 10.5, color: T.danger, fontWeight: 600 }}>Only {formatINR(remaining)} left to pay</span>}
-    </div>
-  );
-}
-
-function MemberPaymentList({ cat, members, deposit, transactions, perMemberShare, addPayment, remindAll, isAdmin, currentUserId, settleRefund }) {
-  const share = perMemberShare;
-  const unpaidCount = share > 0 ? members.filter((m) => paymentBreakdown(netPaidBy(deposit, transactions, cat, m.id), share).status !== "paid").length : 0;
+function MemberPaymentList({ cat, members, deposit, transactions, shares, onPayNow, onMarkPaid, onAdminMarkPaid, remindAll, isAdmin, currentUserId, settleRefund }) {
+  const total = deposit.total || 0;
+  const unpaidCount = total > 0 ? members.filter((m) => {
+    const status = depositMemberStatus(deposit, transactions, cat, m.id, shares[m.id] || 0);
+    return status === "pending" || status === "partial";
+  }).length : 0;
   return (
     <div className="rex-card" style={{ padding: 8 }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "10px 12px 6px" }}>
@@ -231,12 +212,13 @@ function MemberPaymentList({ cat, members, deposit, transactions, perMemberShare
       </div>
       {members.length === 0 ? (
         <div style={{ textAlign: "center", color: T.muted, fontSize: 13.5, padding: "20px 12px" }}>No members yet.</div>
-      ) : share <= 0 ? (
+      ) : total <= 0 ? (
         <div style={{ textAlign: "center", color: T.muted, fontSize: 13.5, padding: "20px 12px" }}>Waiting for the admin to set the amount.</div>
       ) : (
         members.map((m, i) => {
+          const share = shares[m.id] || 0;
           const bd = paymentBreakdown(netPaidBy(deposit, transactions, cat, m.id), share);
-          const status = bd.status;
+          const status = depositMemberStatus(deposit, transactions, cat, m.id, share);
           const remaining = bd.remaining;
           const you = m.id === currentUserId;
           return (
@@ -257,13 +239,20 @@ function MemberPaymentList({ cat, members, deposit, transactions, perMemberShare
                   </div>
                 </div>
                 <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
-                  {status !== "paid" && isAdmin && (
+                  {you && !isAdmin && (status === "pending" || status === "partial") && (
                     <>
-                      <AddPaymentControl remaining={remaining} onAdd={(amt) => addPayment(cat, m.id, amt)} />
-                      <button className="rex-btn rex-btn-ghost" onClick={() => addPayment(cat, m.id, remaining)} title={`Pay the full ${formatINR(remaining)}`} style={{ display: "flex", alignItems: "center", gap: 5, whiteSpace: "nowrap" }}>
-                        <Check size={13} strokeWidth={2.6} /> Pay full
+                      <button className="rex-btn rex-btn-ghost" onClick={onPayNow} style={{ display: "flex", alignItems: "center", gap: 5, whiteSpace: "nowrap" }}>
+                        <Smartphone size={13} /> Pay Now
+                      </button>
+                      <button className="rex-btn" onClick={onMarkPaid} style={{ display: "flex", alignItems: "center", gap: 5, whiteSpace: "nowrap", background: T.primary, color: "#fff", border: "none", borderRadius: 10, fontWeight: 700, padding: "9px 14px", fontSize: 13, cursor: "pointer" }}>
+                        <Check size={13} /> I've Paid
                       </button>
                     </>
+                  )}
+                  {isAdmin && status !== "paid" && (
+                    <button className="rex-btn" onClick={() => onAdminMarkPaid(m.id)} title={status === "pending_verification" ? "Confirm this member's payment" : `Mark the full ${formatINR(remaining)} as paid`} style={{ display: "flex", alignItems: "center", gap: 5, whiteSpace: "nowrap", background: T.success, color: "#fff", border: "none", borderRadius: 10, fontWeight: 700, padding: "9px 14px", fontSize: 13, cursor: "pointer" }}>
+                      <Check size={13} strokeWidth={2.6} /> Mark as Paid
+                    </button>
                   )}
                   {status === "paid" && bd.credit > 0 && isAdmin && (
                     <button className="rex-btn rex-btn-ghost" onClick={() => settleRefund(cat, m.id)} title="Book this refund as a ledger expense" style={{ display: "flex", alignItems: "center", gap: 5, whiteSpace: "nowrap" }}>
@@ -281,78 +270,46 @@ function MemberPaymentList({ cat, members, deposit, transactions, perMemberShare
   );
 }
 
-function DepositHistoryList({ meta, history, memberName }) {
-  const sorted = [...history].sort((a, b) => new Date(b.date) - new Date(a.date));
-  return (
-    <div className="rex-card">
-      <SectionHeading icon={Receipt} color={meta.accent} soft={meta.soft} title="Deposit history" subtitle={sorted.length ? `${sorted.length} payment${sorted.length === 1 ? "" : "s"} this cycle` : "No payments recorded yet"} />
-      {sorted.length === 0 ? (
-        <div style={{ textAlign: "center", color: T.muted, fontSize: 13.5, padding: "12px 0" }}>Payments show up here as they're added.</div>
-      ) : (
-        <div>
-          {sorted.map((h, i) => (
-            <div key={h.id} className="rex-row" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: "11px 4px", borderBottom: i === sorted.length - 1 ? "none" : `1px solid ${T.border}` }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
-                <Avatar name={memberName(h.memberId)} size={30} />
-                <div style={{ minWidth: 0 }}>
-                  <div style={{ fontSize: 13.5, fontWeight: 600 }}>{memberName(h.memberId)}</div>
-                  <div style={{ fontSize: 11.5, color: T.muted }}>
-                    {h.amount < 0 ? "Refund · " : ""}{new Date(h.date).toLocaleDateString("en-IN", { day: "numeric", month: "short" })} · {new Date(h.date).toLocaleTimeString("en-IN", { hour: "numeric", minute: "2-digit" })}
-                  </div>
-                </div>
-              </div>
-              <span style={{ fontFamily: T.fontMono, fontSize: 14, fontWeight: 700, color: h.amount < 0 ? T.warning : T.success, flexShrink: 0 }}>
-                {h.amount < 0 ? formatINR(h.amount) : "+" + formatINR(h.amount)}
-              </span>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-export function DepositPanel({ cat, state, isAdmin, currentUserId, canEdit, lockReason, periodText, depositDrafts, setDepositDrafts, setDepositTotal, addPayment, remindAll, settleRefund, perMemberShare, collected, memberName }) {
+export function DepositPanel({ cat, state, isAdmin, currentUserId, canEdit, lockReason, periodText, depositDrafts, setDepositDrafts, setDepositTotal, onPayNow, onMarkPaid, onAdminMarkPaid, remindAll, settleRefund, perMemberShare, shares, collected }) {
   const meta = CATEGORY_META[cat];
   const deposit = state.deposits[cat];
-  const fullyPaidCount = state.members.filter((m) => paymentStatus(netPaidBy(deposit, state.transactions, cat, m.id), perMemberShare) === "paid").length;
+  const fullyPaidCount = state.members.filter((m) => depositMemberStatus(deposit, state.transactions, cat, m.id, shares[m.id] || 0) === "paid").length;
   return (
     <div style={{ display: "grid", gap: 14 }}>
       <DepositSetupCard meta={meta} total={deposit.total} canEdit={canEdit} lockReason={lockReason}
         draft={depositDrafts[cat]} setDraft={(v) => setDepositDrafts((d) => ({ ...d, [cat]: v }))} onSet={() => setDepositTotal(cat)}
         collected={collected} fullyPaidCount={fullyPaidCount} memberCount={state.members.length} perMemberShare={perMemberShare} periodText={periodText} />
-      <MemberPaymentList cat={cat} members={state.members} deposit={deposit} transactions={state.transactions} perMemberShare={perMemberShare}
-        addPayment={addPayment} remindAll={remindAll} isAdmin={isAdmin} currentUserId={currentUserId} settleRefund={settleRefund} />
-      <DepositHistoryList meta={meta} history={deposit.history} memberName={memberName} />
+      <MemberPaymentList cat={cat} members={state.members} deposit={deposit} transactions={state.transactions} shares={shares}
+        onPayNow={onPayNow} onMarkPaid={onMarkPaid} onAdminMarkPaid={onAdminMarkPaid} remindAll={remindAll} isAdmin={isAdmin} currentUserId={currentUserId} settleRefund={settleRefund} />
     </div>
   );
 }
 
-export function GroceryPanel({ state, isAdmin, currentUserId, canEdit, lockReason, periodText, depositDrafts, setDepositDrafts, setDepositTotal, addPayment, remindAll, settleRefund, perMemberShare, collected, memberName, grocery }) {
+export function GroceryPanel({ state, isAdmin, currentUserId, canEdit, lockReason, periodText, depositDrafts, setDepositDrafts, setDepositTotal, onPayNow, onMarkPaid, onAdminMarkPaid, remindAll, settleRefund, perMemberShare, shares, collected, grocery }) {
   const meta = CATEGORY_META.grocery;
   const deposit = state.deposits.grocery;
-  const fullyPaidCount = state.members.filter((m) => paymentStatus(netPaidBy(deposit, state.transactions, "grocery", m.id), perMemberShare) === "paid").length;
+  const fullyPaidCount = state.members.filter((m) => depositMemberStatus(deposit, state.transactions, "grocery", m.id, shares[m.id] || 0) === "paid").length;
   return (
     <div style={{ display: "grid", gap: 14 }}>
       <DepositSetupCard meta={meta} total={deposit.total} canEdit={canEdit} lockReason={lockReason}
         draft={depositDrafts.grocery} setDraft={(v) => setDepositDrafts((d) => ({ ...d, grocery: v }))} onSet={() => setDepositTotal("grocery")}
         collected={collected} fullyPaidCount={fullyPaidCount} memberCount={state.members.length} perMemberShare={perMemberShare} periodText={periodText} carryover={grocery.carryover} />
-      <MemberPaymentList cat="grocery" members={state.members} deposit={deposit} transactions={state.transactions} perMemberShare={perMemberShare}
-        addPayment={addPayment} remindAll={remindAll} isAdmin={isAdmin} currentUserId={currentUserId} settleRefund={settleRefund} />
-      <DepositHistoryList meta={meta} history={deposit.history} memberName={memberName} />
+      <MemberPaymentList cat="grocery" members={state.members} deposit={deposit} transactions={state.transactions} shares={shares}
+        onPayNow={onPayNow} onMarkPaid={onMarkPaid} onAdminMarkPaid={onAdminMarkPaid} remindAll={remindAll} isAdmin={isAdmin} currentUserId={currentUserId} settleRefund={settleRefund} />
     </div>
   );
 }
 
 /* ---------------------------------- Ledger ---------------------------------- */
-export function LedgerPanel({ state, isAdmin, balances, periodText, memberName, deleteTransaction, openExpenseModal, onStartNewMonth }) {
+export function LedgerPanel({ state, isAdmin, balances, periodText, memberName, deleteTransaction, deleteDepositPayment, openExpenseModal, onStartNewMonth }) {
   const cats = ["rent", "electricity", "grocery"];
-  const items = [...state.transactions].sort((a, b) => new Date(b.date) - new Date(a.date));
+  const items = buildLedgerItems(state);
+  const handleDelete = (item) => (item.kind === "received" ? deleteDepositPayment(item.category, item.id) : deleteTransaction(item.id));
   return (
     <div style={{ display: "grid", gap: 14 }}>
       <div className="rex-card">
         <div className="rex-panel-header" style={{ marginBottom: 14 }}>
-          <SectionHeading icon={Receipt} color={T.primary} soft={T.primarySoft} title="Expense ledger" subtitle={`Rent, electricity and grocery spending · ${periodText}`} />
+          <SectionHeading icon={Receipt} color={T.primary} soft={T.primarySoft} title="Ledger" subtitle={`Payments received, expenses, and refunds · ${periodText}`} />
           {isAdmin ? (
             <div className="rex-panel-actions">
               <button className="rex-btn rex-btn-ghost" style={{ display: "flex", alignItems: "center", gap: 6, whiteSpace: "nowrap" }} title="Reset electricity + grocery for a new month, carrying over the grocery balance" onClick={onStartNewMonth}>
@@ -396,30 +353,39 @@ export function LedgerPanel({ state, isAdmin, balances, periodText, memberName, 
 
       <div className="rex-card">
         {items.length === 0 ? (
-          <div style={{ textAlign: "center", color: T.muted, fontSize: 13.5, padding: "20px 0" }}>No expenses recorded yet.</div>
+          <div style={{ textAlign: "center", color: T.muted, fontSize: 13.5, padding: "20px 0" }}>Nothing recorded yet.</div>
         ) : (
           <div>
             {items.map((t, i) => {
               const meta = CATEGORY_META[t.category] || CATEGORY_META.grocery;
-              const Icon = t.type === "refund" ? RotateCcw : meta.icon;
-              const isRefund = t.type === "refund";
+              const isRefund = t.kind === "refund";
+              const isReceived = t.kind === "received";
+              const Icon = isRefund ? RotateCcw : meta.icon;
+              const badgeColor = isReceived ? T.success : isRefund ? T.warning : meta.accent;
+              const badgeSoft = isReceived ? T.successSoft : isRefund ? T.warningSoft : meta.soft;
+              const title = isReceived ? memberName(t.memberId) : t.description;
+              const subtitle = isReceived
+                ? `${meta.label} · Payment received · ${new Date(t.date).toLocaleDateString("en-IN", { day: "numeric", month: "short" })}`
+                : `${meta.label} · ${isRefund ? `Refunded to ${memberName(t.refundTo)}` : `Paid by ${memberName(t.paidBy)}`} · ${new Date(t.date).toLocaleDateString("en-IN", { day: "numeric", month: "short" })}`;
               return (
                 <div key={t.id} className="rex-row" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: "11px 6px", borderBottom: i === items.length - 1 ? "none" : `1px solid ${T.border}` }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
-                    <div style={{ width: 34, height: 34, borderRadius: 9, background: isRefund ? T.warningSoft : meta.soft, color: isRefund ? T.warning : meta.accent, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 800, flexShrink: 0, fontFamily: T.fontMono }}>
-                      {isRefund ? <RotateCcw size={14} /> : "#" + t.orderNo}
+                    <div style={{ width: 34, height: 34, borderRadius: 9, background: badgeSoft, color: badgeColor, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 800, flexShrink: 0, fontFamily: T.fontMono }}>
+                      {isReceived ? <Check size={14} /> : isRefund ? <RotateCcw size={14} /> : "#" + t.orderNo}
                     </div>
                     <div style={{ minWidth: 0 }}>
-                      <div style={{ fontSize: 13.5, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.description}</div>
+                      <div style={{ fontSize: 13.5, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{title}</div>
                       <div style={{ fontSize: 11.5, color: T.muted, display: "flex", alignItems: "center", gap: 4, flexWrap: "wrap" }}>
-                        <Icon size={11} color={isRefund ? T.warning : meta.accent} /> {meta.label} · {isRefund ? `Refunded to ${memberName(t.refundTo)}` : `Paid by ${memberName(t.paidBy)}`} · {new Date(t.date).toLocaleDateString("en-IN", { day: "numeric", month: "short" })}
+                        <Icon size={11} color={badgeColor} /> {subtitle}
                       </div>
                     </div>
                   </div>
                   <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
-                    <span style={{ fontFamily: T.fontMono, fontSize: 14, fontWeight: 700, color: isRefund ? T.warning : T.danger }}>-{formatINR(t.amount)}</span>
+                    <span style={{ fontFamily: T.fontMono, fontSize: 14, fontWeight: 700, color: isReceived ? T.success : isRefund ? T.warning : T.danger }}>
+                      {isReceived ? "+" : "-"}{formatINR(t.amount)}
+                    </span>
                     {isAdmin && (
-                      <button onClick={() => deleteTransaction(t.id)} aria-label={isRefund ? "Delete refund" : "Delete expense"} style={{ background: "none", border: "none", cursor: "pointer", color: T.muted, padding: 4 }}>
+                      <button onClick={() => handleDelete(t)} aria-label={isReceived ? "Delete payment" : isRefund ? "Delete refund" : "Delete expense"} style={{ background: "none", border: "none", cursor: "pointer", color: T.muted, padding: 4 }}>
                         <Trash2 size={14} />
                       </button>
                     )}
@@ -454,25 +420,35 @@ export function ConfirmModal({ title, message, confirmLabel = "Confirm", danger,
 }
 
 /* ------------------------------ Settings modal ------------------------------ */
-export function SettingsModal({ member, email, onSave, onClose, isAdmin, onDeleteRoom }) {
+export function SettingsModal({ member, email, onSave, onClose, isAdmin, onDeleteRoom, requireUpi }) {
   const [name, setName] = useState(member.name || "");
   const [gender, setGender] = useState(member.gender || "");
   const [mobile, setMobile] = useState(member.mobile || "");
+  const [upiId, setUpiId] = useState(member.upiId || "");
   const [attempted, setAttempted] = useState(false);
   const nameValid = name.trim().length > 0;
   const mobileValid = !mobile || isValidMobile(mobile);
-  const canSubmit = nameValid && mobileValid;
+  const upiValid = isValidUpi(upiId);
+  const canSubmit = nameValid && mobileValid && upiValid;
   const handleSubmit = () => {
     if (!canSubmit) { setAttempted(true); return; }
-    onSave({ name: name.trim(), gender, mobile: mobile.trim() });
+    onSave({ name: name.trim(), gender, mobile: mobile.trim(), upiId: upiId.trim() });
   };
+  const handleClose = () => { if (!requireUpi) onClose(); };
   return (
-    <div className="rex-modal-overlay" onClick={onClose}>
+    <div className="rex-modal-overlay" onClick={handleClose}>
       <div className="rex-modal-sheet" onClick={(e) => e.stopPropagation()}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 18 }}>
           <div style={{ fontSize: 17, fontWeight: 800 }}>My details</div>
-          <button onClick={onClose} aria-label="Close" style={{ background: T.subtleBg, border: "none", borderRadius: 8, width: 30, height: 30, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: T.inkSoft }}><X size={16} /></button>
+          {!requireUpi && (
+            <button onClick={onClose} aria-label="Close" style={{ background: T.subtleBg, border: "none", borderRadius: 8, width: 30, height: 30, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: T.inkSoft }}><X size={16} /></button>
+          )}
         </div>
+        {requireUpi && (
+          <div style={{ fontSize: 13, color: T.inkSoft, background: T.subtleBg, borderRadius: 10, padding: "10px 12px", marginBottom: 14, lineHeight: 1.5 }}>
+            Add your UPI ID to continue — it's needed so other members can pay you back.
+          </div>
+        )}
         <div style={{ display: "grid", gap: 12 }}>
           <div>
             <label style={{ fontSize: 12.5, fontWeight: 700, color: T.inkSoft, display: "block", marginBottom: 6 }}>Name *</label>
@@ -499,6 +475,12 @@ export function SettingsModal({ member, email, onSave, onClose, isAdmin, onDelet
               onChange={(e) => setMobile(e.target.value.replace(/\D/g, ""))} onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
               style={{ borderColor: attempted && !mobileValid ? T.danger : undefined }} />
             {attempted && !mobileValid && <div style={{ color: T.danger, fontSize: 11.5, fontWeight: 600, marginTop: 5 }}>Enter a valid 10-digit mobile number.</div>}
+          </div>
+          <div>
+            <label style={{ fontSize: 12.5, fontWeight: 700, color: T.inkSoft, display: "block", marginBottom: 6 }}>UPI ID *</label>
+            <input className="rex-input" placeholder="yourname@upi" value={upiId} onChange={(e) => setUpiId(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
+              style={{ borderColor: attempted && !upiValid ? T.danger : undefined }} />
+            {attempted && !upiValid && <div style={{ color: T.danger, fontSize: 11.5, fontWeight: 600, marginTop: 5 }}>Enter a valid UPI ID (e.g. name@bank).</div>}
           </div>
           <button className="rex-btn" style={{ marginTop: 4, padding: "13px 18px", fontSize: 15, border: "none", borderRadius: 10, fontWeight: 700, background: T.primary, color: "#fff", cursor: "pointer" }} onClick={handleSubmit}>
             Save details

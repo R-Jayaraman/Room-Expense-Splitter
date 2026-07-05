@@ -4,11 +4,17 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="theme-color" content="#F6F6F7" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png" />
+    <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
     <title>Room Split — shared expenses</title>
     <style>
       html, body, #root { height: 100%; margin: 0; }
-      body { background: #F6F6F7; }
-      html[data-theme="dark"] body { background: #17120D; }
+      /* Matches the native Android splash background (see colors.xml /
+         capacitor.config.json) so there's no white/gray flash between the
+         native cold-start splash handing off and the JS splash screen
+         (also orange) taking over once React mounts. */
+      body { background: #FF7A00; }
     </style>
     <script>
       (function () {

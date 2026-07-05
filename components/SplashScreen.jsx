@@ -63,7 +63,7 @@ export default function SplashScreen({ onDone }) {
         }
 
         .rs-splash-name {
-          position: fixed; left: 0; right: 0; bottom: 48px; text-align: center;
+          position: fixed; left: 0; right: 0; bottom: calc(96px + env(safe-area-inset-bottom, 0px)); text-align: center;
           font-size: 16px; font-weight: 700; letter-spacing: 0.04em; color: #fff;
           text-shadow: 0 1px 6px rgba(0,0,0,0.25);
           font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
@@ -72,7 +72,7 @@ export default function SplashScreen({ onDone }) {
         @keyframes rs-name-in { to { opacity: 1; } }
 
         .rs-splash-credit {
-          position: fixed; left: 0; right: 0; bottom: 26px; text-align: center;
+          position: fixed; left: 0; right: 0; bottom: calc(74px + env(safe-area-inset-bottom, 0px)); text-align: center;
           font-size: 11.5px; font-weight: 600; letter-spacing: 0.03em; color: rgba(255,255,255,0.75);
           font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
           opacity: 0; animation: rs-name-in 0.5s ease 0.9s forwards;

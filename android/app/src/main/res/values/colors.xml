@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Matches the mid-tone of the JS SplashScreen's orange radial gradient
+         so the native cold-start splash (mandatory on Android 12+) blends
+         into the animated one instead of flashing a mismatched screen first. -->
+    <color name="splashBackground">#FF7A00</color>
+</resources>

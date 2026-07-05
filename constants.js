@@ -25,9 +25,9 @@ export const defaultState = {
   period: "",
   members: [],
   deposits: {
-    rent: { total: 0, history: [] },
-    electricity: { total: 0, history: [] },
-    grocery: { total: 0, history: [], carryover: 0 },
+    rent: { total: 0, history: [], verification: {} },
+    electricity: { total: 0, history: [], verification: {} },
+    grocery: { total: 0, history: [], carryover: 0, verification: {} },
   },
   transactions: [],
 };

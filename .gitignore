@@ -1,10 +1,22 @@
-node_modules
-dist
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Environment files
 .env
+.env.local
+.env.production
+.env.development
+.env*
+
+# Allow the example file
+!.env.example
+
+# Vercel
+.vercel/
+
+# OS files
 .DS_Store
 .vercel
-Paid
-Electricity
-Paid
-₹400 / ₹400
-.env*

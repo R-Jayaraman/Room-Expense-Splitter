@@ -21,6 +21,7 @@ import {
 import {
   getFirestore, doc, getDoc, setDoc, deleteDoc, onSnapshot, serverTimestamp, collection, query, where, getDocs, writeBatch,
 } from "firebase/firestore";
+import { getFunctions, httpsCallable } from "firebase/functions";
 import { defaultState } from "./constants";
 import { currentPeriod, isValidGmail } from "./utils";
 
@@ -37,7 +38,7 @@ export function isFirebaseConfigured() {
   return Boolean(firebaseConfig.apiKey && firebaseConfig.projectId);
 }
 
-let _app = null, _db = null, _auth = null;
+let _app = null, _db = null, _auth = null, _functions = null;
 function app() { if (!_app) _app = initializeApp(firebaseConfig); return _app; }
 function db() {
   if (!isFirebaseConfigured()) throw new Error("Firebase isn't configured yet — add your keys to .env (see the README).");
@@ -48,6 +49,11 @@ function auth() {
   if (!isFirebaseConfigured()) throw new Error("Firebase isn't configured yet — add your keys to .env (see the README).");
   if (!_auth) { _auth = getAuth(app()); setPersistence(_auth, browserLocalPersistence).catch(() => {}); }
   return _auth;
+}
+function functionsClient() {
+  if (!isFirebaseConfigured()) throw new Error("Firebase isn't configured yet — add your keys to .env (see the README).");
+  if (!_functions) _functions = getFunctions(app());
+  return _functions;
 }
 
 const AUTH_MESSAGES = {
@@ -102,7 +108,7 @@ async function hashPassword(password, salt) {
 
 // -------------------------------- rooms ------------------------------------
 function memberFromUser(user, role) {
-  return { id: user.uid, name: user.displayName || (user.email || "Member").split("@")[0], email: user.email, role, gender: "", mobile: "" };
+  return { id: user.uid, name: user.displayName || (user.email || "Member").split("@")[0], email: user.email, role, gender: "", mobile: "", upiId: "" };
 }
 
 // Every room the user belongs to, so they can jump straight back into any of
@@ -233,4 +239,24 @@ export async function saveRoomState(roomId, state) {
     state, memberUids: (state.members || []).map((m) => m.id), updatedAt: serverTimestamp(),
   }, { merge: true });
   return true;
+}
+
+// ------------------------------ push notifications --------------------------
+// FCM device token lives on users/{uid} (not inside room state) since it's a
+// per-user, not per-room, piece of data — the Cloud Function backend reads it
+// from here to know where to deliver a push. Silently ignored if missing/blank
+// (e.g. on web, where the push plugin never registers one).
+export async function saveFcmToken(uid, token) {
+  if (!uid || !token) return;
+  await setDoc(doc(db(), "users", uid), { fcmToken: token }, { merge: true });
+}
+
+// Callable Cloud Function — mirrors sendReminderEmail but delivers a push
+// instead. No-ops (throws, caught by the caller) if the function isn't
+// deployed yet, same as email does when unconfigured. `roomId`/`category`
+// (the raw tab key, e.g. "rent") are carried in the push's data payload so
+// tapping the notification can deep-link straight to the right room + tab.
+export async function sendReminderPush({ memberUid, roomId, roomName, category, amountDue }) {
+  const fn = httpsCallable(functionsClient(), "sendReminderPush");
+  return fn({ memberUid, roomId, roomName, category, amountDue });
 }

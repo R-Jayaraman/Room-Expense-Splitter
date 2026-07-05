@@ -149,3 +149,6 @@ components/
 RoomExpenseSplit.jsx         → the room dashboard
 ```
 # Room-Expense-Splitter
+# Room-Expense-Splitter
+# Expense-Splitter-Application
+# Expense-Splitter-Application
