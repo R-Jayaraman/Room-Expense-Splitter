@@ -2,8 +2,8 @@
 
 A roommate expense splitter for rent, electricity and groceries — with real user
 accounts, shared rooms, an admin who manages bills, automatic monthly resets,
-carry-over credit when amounts change, and optional email reminders. Amounts are
-in Rupees (₹) and dates use IST.
+carry-over credit when amounts change, and an in-app notification inbox for
+reminders and admin changes. Amounts are in Rupees (₹) and dates use IST.
 
 ---
 
@@ -95,6 +95,20 @@ service cloud.firestore {
           && request.auth.uid == get(/databases/$(database)/documents/rooms/$(roomId)).data.adminUid;
       }
     }
+    match /users/{uid}/notifications/{notificationId} {
+      // No server here (see below) — whichever client performs an action
+      // (recording a payment, sending a reminder, handing off admin, ...)
+      // writes the notification straight into the recipient's own inbox.
+      // That means "create" has to be open to any signed-in user, not just
+      // uid's own — the trade-off for not needing a paid backend is that
+      // this can't verify the writer actually shares a room with uid.
+      allow read, delete: if request.auth != null && request.auth.uid == uid;
+      allow create: if request.auth != null
+        && request.resource.data.keys().hasOnly(["title", "body", "data", "read", "createdAt"])
+        && request.resource.data.read == false;
+      allow update: if request.auth != null && request.auth.uid == uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["read"]);
+    }
   }
 }
 ```
@@ -103,16 +117,17 @@ restrict which fields members may change). Rooms created before this rule was
 added won't have a `secrets/main` doc, so their members will see "Not available"
 for the room password until the admin recreates the room.
 
-### 4. Email reminders (optional)
-Uses [EmailJS](https://www.emailjs.com). Add your keys to `.env`:
-```
-VITE_EMAILJS_SERVICE_ID=...
-VITE_EMAILJS_TEMPLATE_ID=...
-VITE_EMAILJS_PUBLIC_KEY=...
-```
-Create a template using the fields in `email-template.html` (`to_email`,
-`to_name`, `room_name`, `admin_name`, `email_title`, `email_message`, `amount`).
-Without these keys the app works fine; the email buttons just show a hint.
+### 4. Notifications (in-app only)
+The bell icon in the app bar reads from `users/{uid}/notifications`. There's no
+backend involved — sending real OS-level push notifications needs a server
+(a Cloud Function calling FCM), which in turn needs the Firebase project on
+the paid **Blaze** plan. To keep this entirely on the free **Spark** plan,
+every notification-worthy action (a payment reminder, a payment recorded, an
+admin handoff, an expense/refund added or reverted) writes directly into the
+relevant member(s)' inbox from the client at the moment it happens — see
+`notifyMember`/`notifyMembers` in `firebase.js`. The trade-off: notifications
+only show up once someone has the app open (no push while it's closed), and
+"Remind unpaid" only reaches members, not the OS notification tray.
 
 > **Note on "valid Gmail":** the app checks the address is a well-formed Gmail
 > address. Verifying someone actually *owns* it would need email verification /
@@ -128,16 +143,15 @@ npm run preview   # preview the build
 ```
 
 ## Tech
-React 18 + Vite · Firebase Auth + Firestore · EmailJS · lucide-react. No CSS
-framework — a custom "aurora glass" theme with an animated ₹ house-building
-background on the rooms page.
+React 18 + Vite · Firebase Auth + Firestore · lucide-react. No CSS framework —
+a custom "aurora glass" theme with an animated ₹ house-building background on
+the rooms page.
 
 ## Project structure
 ```
 src/main.jsx                 → mounts App
 App.jsx                      → auth → rooms hub → dashboard routing
-firebase.js                  → Auth + Firestore (rooms, membership)
-email.js                     → EmailJS wrapper
+firebase.js                  → Auth + Firestore (rooms, membership, notifications)
 utils.js  constants.js       → math (incl. carry-over) + tokens/defaults
 components/
   AuthShell.jsx              → shared glass styling for auth pages
@@ -152,3 +166,4 @@ RoomExpenseSplit.jsx         → the room dashboard
 # Room-Expense-Splitter
 # Expense-Splitter-Application
 # Expense-Splitter-Application
+# Room-Expense-Splitter
