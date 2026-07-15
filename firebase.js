@@ -19,9 +19,8 @@ import {
   signOut, onAuthStateChanged, updateProfile, setPersistence, browserLocalPersistence,
 } from "firebase/auth";
 import {
-  getFirestore, doc, getDoc, setDoc, deleteDoc, onSnapshot, serverTimestamp, collection, query, where, getDocs, writeBatch,
+  getFirestore, doc, getDoc, setDoc, deleteDoc, onSnapshot, serverTimestamp, collection, query, where, orderBy, limit, getDocs, writeBatch,
 } from "firebase/firestore";
-import { getFunctions, httpsCallable } from "firebase/functions";
 import { defaultState } from "./constants";
 import { currentPeriod, isValidGmail } from "./utils";
 
@@ -38,7 +37,7 @@ export function isFirebaseConfigured() {
   return Boolean(firebaseConfig.apiKey && firebaseConfig.projectId);
 }
 
-let _app = null, _db = null, _auth = null, _functions = null;
+let _app = null, _db = null, _auth = null;
 function app() { if (!_app) _app = initializeApp(firebaseConfig); return _app; }
 function db() {
   if (!isFirebaseConfigured()) throw new Error("Firebase isn't configured yet — add your keys to .env (see the README).");
@@ -49,11 +48,6 @@ function auth() {
   if (!isFirebaseConfigured()) throw new Error("Firebase isn't configured yet — add your keys to .env (see the README).");
   if (!_auth) { _auth = getAuth(app()); setPersistence(_auth, browserLocalPersistence).catch(() => {}); }
   return _auth;
-}
-function functionsClient() {
-  if (!isFirebaseConfigured()) throw new Error("Firebase isn't configured yet — add your keys to .env (see the README).");
-  if (!_functions) _functions = getFunctions(app());
-  return _functions;
 }
 
 const AUTH_MESSAGES = {
@@ -241,22 +235,48 @@ export async function saveRoomState(roomId, state) {
   return true;
 }
 
-// ------------------------------ push notifications --------------------------
-// FCM device token lives on users/{uid} (not inside room state) since it's a
-// per-user, not per-room, piece of data — the Cloud Function backend reads it
-// from here to know where to deliver a push. Silently ignored if missing/blank
-// (e.g. on web, where the push plugin never registers one).
-export async function saveFcmToken(uid, token) {
-  if (!uid || !token) return;
-  await setDoc(doc(db(), "users", uid), { fcmToken: token }, { merge: true });
+// ------------------------------ notification inbox ---------------------------
+// There's no server here — sending real push (FCM) requires a Cloud
+// Function, which in turn requires the Firebase project to be on the paid
+// Blaze plan. To keep this fully free, notifications are written directly
+// by whichever client performs the action, straight into the target
+// member's users/{uid}/notifications, instead of a backend watching for
+// state changes. That means they only show up once someone has the app
+// open (no OS-level push while it's closed), but the in-app bell inbox
+// works exactly the same either way.
+export async function notifyMember(uid, { title, body, data }) {
+  if (!uid) return;
+  const ref = doc(collection(db(), "users", uid, "notifications"));
+  await setDoc(ref, { title, body, data: data || {}, read: false, createdAt: serverTimestamp() });
 }
 
-// Callable Cloud Function — mirrors sendReminderEmail but delivers a push
-// instead. No-ops (throws, caught by the caller) if the function isn't
-// deployed yet, same as email does when unconfigured. `roomId`/`category`
-// (the raw tab key, e.g. "rent") are carried in the push's data payload so
-// tapping the notification can deep-link straight to the right room + tab.
-export async function sendReminderPush({ memberUid, roomId, roomName, category, amountDue }) {
-  const fn = httpsCallable(functionsClient(), "sendReminderPush");
-  return fn({ memberUid, roomId, roomName, category, amountDue });
+export async function notifyMembers(uids, { title, body, data }) {
+  const unique = [...new Set(uids)].filter(Boolean);
+  if (unique.length === 0) return;
+  const batch = writeBatch(db());
+  unique.forEach((uid) => {
+    const ref = doc(collection(db(), "users", uid, "notifications"));
+    batch.set(ref, { title, body, data: data || {}, read: false, createdAt: serverTimestamp() });
+  });
+  await batch.commit();
+}
+
+export function subscribeNotifications(uid, cb) {
+  if (!uid) return () => {};
+  const q = query(collection(db(), "users", uid, "notifications"), orderBy("createdAt", "desc"), limit(50));
+  return onSnapshot(q, (snap) => cb(snap.docs.map((d) => ({ id: d.id, ...d.data() }))), () => cb([]));
+}
+
+export async function markAllNotificationsRead(uid, ids) {
+  if (!uid || !ids || ids.length === 0) return;
+  const batch = writeBatch(db());
+  ids.forEach((id) => batch.set(doc(db(), "users", uid, "notifications", id), { read: true }, { merge: true }));
+  await batch.commit();
+}
+
+export async function deleteAllNotifications(uid, ids) {
+  if (!uid || !ids || ids.length === 0) return;
+  const batch = writeBatch(db());
+  ids.forEach((id) => batch.delete(doc(db(), "users", uid, "notifications", id)));
+  await batch.commit();
 }

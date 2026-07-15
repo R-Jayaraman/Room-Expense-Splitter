@@ -4,7 +4,7 @@ import RoomsHub from "./components/RoomsHub";
 import RoomExpenseSplit from "./RoomExpenseSplit";
 import SplashScreen from "./components/SplashScreen";
 import { watchAuth, logoutUser, isFirebaseConfigured } from "./firebase";
-import { initPushNotifications, onPushTapped } from "./push";
+import { requestNotificationPermission } from "./localNotify";
 
 const THEME_KEY = "rex-theme";
 
@@ -53,30 +53,11 @@ export default function App() {
     return () => unsub && unsub();
   }, []);
 
-  // Registers this device for push once signed in — no-ops on web, and
-  // safe to call again on every sign-in (just refreshes the same token).
+  // Prompts for notification permission once signed in — no-ops on web.
+  // Safe to call on every sign-in; it only actually prompts the first time.
   useEffect(() => {
-    if (user) initPushNotifications(user.uid);
+    if (user) requestNotificationPermission();
   }, [user]);
-
-  // Tapping a notification (app backgrounded or cold-started by the tap)
-  // should jump straight to the room + tab it's about, not wherever the app
-  // last was. Held in its own state — rather than calling setRoomId directly
-  // — so a tap that arrives before auth has resolved isn't wiped out by the
-  // watchAuth listener's unconditional setRoomId(null) above; the effect
-  // below applies it only once a signed-in user actually exists.
-  const [pendingPush, setPendingPush] = useState(null);
-  useEffect(() => {
-    const unsub = onPushTapped(({ roomId: targetRoomId, tab }) => setPendingPush({ roomId: targetRoomId, tab }));
-    return unsub;
-  }, []);
-  useEffect(() => {
-    if (user && pendingPush) {
-      setRoomId(pendingPush.roomId);
-      setInitialTab(pendingPush.tab);
-      setPendingPush(null);
-    }
-  }, [user, pendingPush]);
 
   const enterRoom = (id) => { setInitialTab(null); setRoomId(id); };
   const leaveRoom = () => setRoomId(null);

@@ -205,7 +205,7 @@ function MemberPaymentList({ cat, members, deposit, transactions, shares, onPayN
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "10px 12px 6px" }}>
         <span style={{ fontSize: 13, fontWeight: 700, color: T.inkSoft }}>Payment status</span>
         {isAdmin && unpaidCount > 0 && (
-          <button className="rex-btn rex-btn-ghost" onClick={() => remindAll(cat)} style={{ display: "flex", alignItems: "center", gap: 5 }} title="Email a reminder to everyone who hasn't fully paid">
+          <button className="rex-btn rex-btn-ghost" onClick={() => remindAll(cat)} style={{ display: "flex", alignItems: "center", gap: 5 }} title="Send a reminder notification to everyone who hasn't fully paid">
             <Bell size={13} /> Remind unpaid ({unpaidCount})
           </button>
         )}

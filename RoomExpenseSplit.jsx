@@ -10,8 +10,11 @@ import {
 import { AppBar, GlobalStyle, Aurora } from "./components/Shared";
 import { Overview, MembersPanel, DepositPanel, GroceryPanel, LedgerPanel, ExpenseModal, ConfirmModal, SettingsModal, RoomInfoModal, UpiAppChooserModal } from "./components/Panels";
 import { CharacterNotification } from "./components/CharacterNotification";
-import { subscribeRoom, saveRoomState, deleteRoom, transferAdmin, getRoomPassword, setRoomPassword as saveRoomPassword, sendReminderPush } from "./firebase";
-import { isEmailConfigured, sendReminderEmail } from "./email";
+import {
+  subscribeRoom, saveRoomState, deleteRoom, transferAdmin, getRoomPassword, setRoomPassword as saveRoomPassword,
+  subscribeNotifications, markAllNotificationsRead, deleteAllNotifications, notifyMember, notifyMembers,
+} from "./firebase";
+import { showLocalNotification } from "./localNotify";
 
 export default function RoomExpenseSplit({ user, roomId, initialTab, onLeave, onLogout, theme, onToggleTheme }) {
   const currentUserId = user.uid;
@@ -37,10 +40,37 @@ export default function RoomExpenseSplit({ user, roomId, initialTab, onLeave, on
   const [expenseAmount, setExpenseAmount] = useState("");
   const [expenseDesc, setExpenseDesc] = useState("");
   const [expensePaidBy, setExpensePaidBy] = useState("");
+  const [notifications, setNotifications] = useState([]);
 
-  const emailOn = isEmailConfigured();
   const isAdmin = meta.adminUid === currentUserId;
   const roomName = meta.name;
+
+  // Global to the signed-in user (not this room specifically) — the bell
+  // icon shows whatever's in users/{uid}/notifications regardless of which
+  // room is currently open. Written client-side by whoever performs the
+  // triggering action (see notifyMember/notifyMembers below) — there's no
+  // server here (that'd need the paid Blaze plan).
+  //
+  // Every genuinely NEW item (not already seen on a previous snapshot) also
+  // gets posted as a native Android notification via localNotify, so it
+  // shows up in the OS tray while the app is running — not on the very
+  // first snapshot though, which would otherwise replay the entire existing
+  // inbox as fresh banners the moment the app opens.
+  const seenNotificationIdsRef = useRef(null);
+  useEffect(() => {
+    seenNotificationIdsRef.current = null;
+    const unsub = subscribeNotifications(currentUserId, (list) => {
+      setNotifications(list);
+      const seen = seenNotificationIdsRef.current;
+      if (seen) {
+        for (const n of list) {
+          if (!seen.has(n.id)) showLocalNotification({ title: n.title, body: n.body, data: n.data });
+        }
+      }
+      seenNotificationIdsRef.current = new Set(list.map((n) => n.id));
+    });
+    return unsub;
+  }, [currentUserId]);
 
   const seededRef = useRef(false);
   useEffect(() => {
@@ -86,6 +116,22 @@ export default function RoomExpenseSplit({ user, roomId, initialTab, onLeave, on
     setState((prev) => { const next = typeof updater === "function" ? updater(prev) : updater; persist(next); return next; });
   }, [persist]);
 
+  // For writes that must not be lost to the debounce (e.g. a member's own
+  // profile) — the 300ms delay in persist() above is fine for high-frequency
+  // edits, but if the app is backgrounded/closed within that window (e.g. the
+  // member switches straight to a UPI app after tapping Save) the debounced
+  // write never fires and the edit is silently dropped, which is exactly why
+  // a previously-saved UPI ID could appear to reset itself. This saves right
+  // away instead.
+  const updateStateImmediate = useCallback((updater) => {
+    if (persistTimer.current) { clearTimeout(persistTimer.current); persistTimer.current = null; }
+    setState((prev) => {
+      const next = typeof updater === "function" ? updater(prev) : updater;
+      saveRoomState(roomId, next).then(() => setSaveError(false)).catch(() => setSaveError(true));
+      return next;
+    });
+  }, [roomId]);
+
   // Keyed so each call mounts a fresh CharacterNotification (resetting its
   // own internal auto-dismiss timer) even if the message text repeats.
   const showToast = (msg, tone = "default") => {
@@ -93,8 +139,11 @@ export default function RoomExpenseSplit({ user, roomId, initialTab, onLeave, on
   };
 
   const members = state.members;
-  const adminName = meta.adminName;
   const memberName = (id) => members.find((m) => m.id === id)?.name || "Unknown";
+  // Everyone except whoever's about to trigger the notification — the actor
+  // already sees a toast confirming their own action, so they don't need a
+  // duplicate notification about it too.
+  const otherMemberIds = () => members.map((m) => m.id).filter((mid) => mid !== currentUserId);
   const perMemberShare = (cat) => { const c = members.length; return c ? (state.deposits[cat]?.total || 0) / c : 0; };
   // Exact per-member due, unlike perMemberShare's flat average — see
   // equalShares' doc comment for why the average alone can undercollect.
@@ -159,6 +208,10 @@ export default function RoomExpenseSplit({ user, roomId, initialTab, onLeave, on
     try {
       await transferAdmin(roomId, { uid: id, name: mname });
       showToast(mname + " is now the admin", "success");
+      notifyMember(id, { title: "You're now the admin", body: `You are now the admin of ${roomName}.`, data: { roomId, tab: "members" } });
+      notifyMembers(members.map((m) => m.id).filter((mid) => mid !== id && mid !== currentUserId), {
+        title: "Admin changed", body: `${mname} is now the admin of ${roomName}.`, data: { roomId, tab: "members" },
+      });
     } catch {
       showToast("Couldn't hand off admin rights — try again", "danger");
     }
@@ -181,7 +234,7 @@ export default function RoomExpenseSplit({ user, roomId, initialTab, onLeave, on
   };
 
   const updateProfile = (updates) => {
-    updateState((prev) => ({
+    updateStateImmediate((prev) => ({
       ...prev,
       members: prev.members.map((m) => (m.id === currentUserId ? { ...m, ...updates } : m)),
     }));
@@ -286,6 +339,13 @@ export default function RoomExpenseSplit({ user, roomId, initialTab, onLeave, on
       },
     }));
     showToast("Marked as paid — waiting for admin to verify", "default");
+    if (meta.adminUid) {
+      notifyMember(meta.adminUid, {
+        title: "Payment awaiting verification",
+        body: `${memberName(currentUserId)} marked their ${CATEGORY_META[cat].label} payment as paid in ${roomName} — review and confirm it.`,
+        data: { roomId, tab: cat },
+      });
+    }
   };
 
   // Admin's one-click resolution for a member's row. If the member already
@@ -298,6 +358,22 @@ export default function RoomExpenseSplit({ user, roomId, initialTab, onLeave, on
     if (!isAdmin) return showToast("Only the admin can do this", "danger");
     const deposit = state.deposits[cat];
     const claim = deposit.verification && deposit.verification[memberId];
+    // The affected member gets a distinct, personal notice (this is what
+    // they actually care about — the admin marked *them* paid); everyone
+    // else just gets the general ledger update, and the admin (who's right
+    // here doing it) doesn't need either.
+    const notifyPaymentRecorded = (amount) => {
+      if (memberId !== currentUserId) {
+        notifyMember(memberId, {
+          title: "Marked as paid", body: `Admin marked you as paid for ${CATEGORY_META[cat].label} — ${formatINR(amount)} in ${roomName}.`,
+          data: { roomId, tab: cat },
+        });
+      }
+      notifyMembers(otherMemberIds().filter((mid) => mid !== memberId), {
+        title: "Payment recorded", body: `${memberName(memberId)} paid ${formatINR(amount)} for ${CATEGORY_META[cat].label} in ${roomName}.`,
+        data: { roomId, tab: "ledger" },
+      });
+    };
     if (claim) {
       updateState((prev) => {
         const dep = prev.deposits[cat];
@@ -306,6 +382,7 @@ export default function RoomExpenseSplit({ user, roomId, initialTab, onLeave, on
         return { ...prev, deposits: { ...prev.deposits, [cat]: { ...dep, history: [entry, ...dep.history], verification: restVerification } } };
       });
       showToast(`Marked ${memberName(memberId)}'s payment as paid`, "success");
+      notifyPaymentRecorded(claim.amount);
       return;
     }
     const share = memberShares(cat)[memberId] || 0;
@@ -317,6 +394,7 @@ export default function RoomExpenseSplit({ user, roomId, initialTab, onLeave, on
       return { ...prev, deposits: { ...prev.deposits, [cat]: { ...dep, history: [entry, ...dep.history] } } };
     });
     showToast(`Marked ${memberName(memberId)}'s payment as paid`, "success");
+    notifyPaymentRecorded(remaining);
   };
 
   // If the admin lowers a total after members already paid the old share, this
@@ -337,8 +415,23 @@ export default function RoomExpenseSplit({ user, roomId, initialTab, onLeave, on
     };
     updateState((prev) => ({ ...prev, transactions: [entry, ...prev.transactions] }));
     showToast(`Refunded ${formatINR(credit)} to ${memberName(memberId)}`, "success");
+    if (memberId !== currentUserId) {
+      notifyMember(memberId, {
+        title: "Refund recorded", body: `You were refunded ${formatINR(credit)} for ${CATEGORY_META[cat].label} in ${roomName}.`,
+        data: { roomId, tab: "ledger" },
+      });
+    }
+    notifyMembers(otherMemberIds().filter((mid) => mid !== memberId), {
+      title: "Refund recorded", body: `${formatINR(credit)} refunded to ${memberName(memberId)} for ${CATEGORY_META[cat].label} in ${roomName}.`,
+      data: { roomId, tab: "ledger" },
+    });
   };
 
+  // Reminders land straight in the target member's notification bell — no
+  // server involved (that'd need a Cloud Function, which needs the paid
+  // Blaze plan), so this just writes the notification directly instead of
+  // waiting on a backend to notice the change. Email reminders have been
+  // retired in favor of this single in-app channel.
   const remindAll = async (cat) => {
     if (!isAdmin) return;
     const shares = memberShares(cat);
@@ -347,22 +440,15 @@ export default function RoomExpenseSplit({ user, roomId, initialTab, onLeave, on
       .filter((x) => x.due > 0.01);
     if (unpaid.length === 0) return showToast("Everyone has already paid", "default");
 
-    // Push reminders are best-effort and silent — the backend just skips
-    // members with no registered device token, and this whole call is a
-    // no-op if the Cloud Function isn't deployed yet.
-    Promise.allSettled(
-      unpaid.map((x) => sendReminderPush({ memberUid: x.member.id, roomId, roomName, category: cat, amountDue: x.due }))
-    ).catch(() => {});
-
-    if (!emailOn) return showToast("Email isn't set up yet — see the README", "danger");
-    const withEmail = unpaid.filter((x) => x.member.email);
-    if (withEmail.length === 0) return showToast("None of the unpaid members have an email on file", "danger");
-    showToast(`Sending reminders to ${withEmail.length} member${withEmail.length === 1 ? "" : "s"}…`);
+    showToast(`Sending reminders to ${unpaid.length} member${unpaid.length === 1 ? "" : "s"}…`);
     const results = await Promise.allSettled(
-      withEmail.map((x) => sendReminderEmail({ member: x.member, roomName, adminName, category: CATEGORY_META[cat].label, amountDue: x.due }))
+      unpaid.map((x) => notifyMember(x.member.id, {
+        title: "Payment reminder", body: `You need to pay ${formatINR(x.due)} for ${CATEGORY_META[cat].label} in ${roomName}.`,
+        data: { roomId, tab: cat },
+      }))
     );
     const sent = results.filter((r) => r.status === "fulfilled").length;
-    showToast(`Reminded ${sent}/${withEmail.length} member${withEmail.length === 1 ? "" : "s"}`, sent > 0 ? "success" : "danger");
+    showToast(`Reminded ${sent}/${unpaid.length} member${unpaid.length === 1 ? "" : "s"}`, sent > 0 ? "success" : "danger");
   };
 
   const addExpense = () => {
@@ -382,11 +468,26 @@ export default function RoomExpenseSplit({ user, roomId, initialTab, onLeave, on
     updateState((prev) => ({ ...prev, transactions: [entry, ...prev.transactions] }));
     setExpenseAmount(""); setExpenseDesc(""); setExpensePaidBy(""); setExpenseModalOpen(false);
     showToast(CATEGORY_META[category].label + " expense #" + entry.orderNo + " recorded", "success");
+    notifyMembers(otherMemberIds(), {
+      title: "Expense recorded", body: `${memberName(expensePaidBy)} recorded a ${CATEGORY_META[category].label} expense of ${formatINR(entry.amount)} in ${roomName}: ${description}`,
+      data: { roomId, tab: "ledger" },
+    });
   };
 
   const deleteTransaction = (id) => {
     if (!isAdmin) return showToast("Only the admin can edit expenses", "danger");
+    const t = state.transactions.find((tx) => tx.id === id);
     updateState((prev) => ({ ...prev, transactions: prev.transactions.filter((t) => t.id !== id) }));
+    if (t) {
+      const isRefund = t.type === "refund";
+      notifyMembers(otherMemberIds(), {
+        title: isRefund ? "Refund reverted" : "Expense reverted",
+        body: isRefund
+          ? `A ${formatINR(t.amount)} refund to ${memberName(t.refundTo)} for ${CATEGORY_META[t.category].label} was reverted in ${roomName}.`
+          : `${memberName(t.paidBy)}'s ${CATEGORY_META[t.category].label} expense of ${formatINR(t.amount)} (${t.description}) was reverted in ${roomName}.`,
+        data: { roomId, tab: "ledger" },
+      });
+    }
   };
 
   // Rolls back a confirmed deposit payment straight from the Ledger — the
@@ -394,11 +495,18 @@ export default function RoomExpenseSplit({ user, roomId, initialTab, onLeave, on
   // from deposit.history, not stored redundantly anywhere else.
   const deleteDepositPayment = (cat, historyId) => {
     if (!isAdmin) return showToast("Only the admin can edit the ledger", "danger");
+    const h = state.deposits[cat].history.find((entry) => entry.id === historyId);
     updateState((prev) => ({
       ...prev,
       deposits: { ...prev.deposits, [cat]: { ...prev.deposits[cat], history: prev.deposits[cat].history.filter((h) => h.id !== historyId) } },
     }));
     showToast("Payment removed", "default");
+    if (h) {
+      notifyMembers(otherMemberIds(), {
+        title: "Payment reverted", body: `${memberName(h.memberId)}'s ${formatINR(h.amount)} ${CATEGORY_META[cat].label} payment was reverted in ${roomName}.`,
+        data: { roomId, tab: "ledger" },
+      });
+    }
   };
 
   const startNewMonth = () => {
@@ -434,7 +542,9 @@ export default function RoomExpenseSplit({ user, roomId, initialTab, onLeave, on
     <div className="rex-app" style={{ fontFamily: T.fontBody, background: T.bg, color: T.ink, minHeight: "100vh" }}>
       <GlobalStyle /><Aurora />
       <AppBar userName={currentMember?.name || "You"} saveError={saveError} roomName={roomName} roomId={roomId} isAdmin={isAdmin} periodText={periodText}
-        onLeave={onLeave} onLogout={onLogout} onOpenSettings={openSettings} onOpenRoomInfo={openRoomInfo} theme={theme} onToggleTheme={onToggleTheme} />
+        onLeave={onLeave} onLogout={onLogout} onOpenSettings={openSettings} onOpenRoomInfo={openRoomInfo} theme={theme} onToggleTheme={onToggleTheme}
+        notifications={notifications} onMarkAllNotificationsRead={(ids) => markAllNotificationsRead(currentUserId, ids)}
+        onClearAllNotifications={(ids) => deleteAllNotifications(currentUserId, ids)} />
 
       <nav className="rex-tabs-desktop"><div className="rex-tabs-desktop-inner">
         {TABS.map((t) => { const Icon = t.icon; const active = activeTab === t.id; return (

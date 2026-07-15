@@ -2,8 +2,5 @@
   "appId": "com.roomexpensesplit.app",
   "appName": "room-expense-split",
   "webDir": "dist",
-  "backgroundColor": "#FF7A00",
-  "appFlags": {
-    "pushReady": false
-  }
+  "backgroundColor": "#FF7A00"
 }

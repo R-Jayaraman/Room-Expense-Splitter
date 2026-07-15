@@ -1,7 +1,90 @@
-import React from "react";
-import { Check, Clock, LogOut, Crown, DoorOpen, Settings, Sun, Moon } from "lucide-react";
+import React, { useState } from "react";
+import { createPortal } from "react-dom";
+import { Check, Clock, LogOut, Crown, DoorOpen, Settings, Sun, Moon, Bell, X } from "lucide-react";
 import { T } from "../constants";
 import { colorForName } from "../utils";
+
+function timeAgo(value) {
+  const date = value && typeof value.toDate === "function" ? value.toDate() : new Date(value);
+  const mins = Math.max(0, Math.floor((Date.now() - date.getTime()) / 60000));
+  if (mins < 1) return "just now";
+  if (mins < 60) return mins + "m ago";
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return hours + "h ago";
+  return Math.floor(hours / 24) + "d ago";
+}
+
+// Bell icon + inbox for the per-user notification feed (see firebase.js's
+// subscribeNotifications) — this is what payment reminders and admin-change
+// alerts show up as now that email has been retired in favor of one unified
+// in-app (and push, on the native app) channel.
+//
+// Opens using the exact same overlay + bottom-sheet pattern as every other
+// modal in the app (rex-modal-overlay/rex-modal-sheet — see SettingsModal,
+// ConfirmModal, RoomInfoModal), rendered via a portal into document.body.
+// An earlier version tried to position a small dropdown from the bell
+// button's own bounding rect, which the app bar's `overflow: hidden` (for
+// its background blob animation) clipped/misaligned depending on layout —
+// the full-screen modal sidesteps all of that positioning math entirely.
+function NotificationBell({ notifications, onMarkAllRead, onClearAll }) {
+  const [open, setOpen] = useState(false);
+  const unread = notifications.filter((n) => !n.read);
+
+  // Opening the panel is the "read" action — no separate button needed.
+  // Matches how a normal notification tray behaves (and how Settings has no
+  // extra "acknowledge" step, just clean fields), so all rows render the
+  // same plain/transparent way instead of highlighting an "unread" state.
+  const openPanel = () => {
+    setOpen(true);
+    if (unread.length > 0) onMarkAllRead(unread.map((n) => n.id));
+  };
+
+  return (
+    <>
+      <button className="rex-theme-toggle" onClick={openPanel} aria-label="Notifications" title="Notifications" style={{ position: "relative" }}>
+        <Bell size={16} strokeWidth={2.2} />
+        {unread.length > 0 && (
+          <span style={{ position: "absolute", top: 3, right: 3, minWidth: 14, height: 14, borderRadius: 7, background: T.danger, color: "#fff", fontSize: 9, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 3px", lineHeight: 1 }}>
+            {unread.length > 9 ? "9+" : unread.length}
+          </span>
+        )}
+      </button>
+      {open && createPortal(
+        <div className="rex-modal-overlay" onClick={() => setOpen(false)}>
+          <div className="rex-modal-sheet" onClick={(e) => e.stopPropagation()} style={{ padding: "22px 0 calc(22px + env(safe-area-inset-bottom, 0px))" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 20px 14px" }}>
+              <div style={{ fontSize: 17, fontWeight: 800, color: T.ink }}>Notifications</div>
+              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                {notifications.length > 0 && (
+                  <button onClick={() => onClearAll(notifications.map((n) => n.id))} style={{ background: "none", border: "none", color: T.primary, fontSize: 12.5, fontWeight: 700, cursor: "pointer", padding: 0 }}>
+                    Clear all
+                  </button>
+                )}
+                <button onClick={() => setOpen(false)} aria-label="Close" style={{ background: T.subtleBg, border: "none", borderRadius: 8, width: 30, height: 30, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: T.inkSoft, flexShrink: 0 }}>
+                  <X size={16} />
+                </button>
+              </div>
+            </div>
+            {notifications.length === 0 ? (
+              <div style={{ padding: "26px 20px", textAlign: "center", fontSize: 12.5, color: T.muted }}>No notifications yet</div>
+            ) : (
+              <div style={{ maxHeight: "60vh", overflowY: "auto" }}>
+                {notifications.map((n) => (
+                  <div key={n.id} style={{ padding: "12px 20px", borderTop: `1px solid ${T.border}` }}>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: T.ink, marginBottom: 2 }}>{n.title}</div>
+                    <div style={{ fontSize: 12, color: T.inkSoft, lineHeight: 1.4 }}>{n.body}</div>
+                    {n.createdAt && <div style={{ fontSize: 10.5, color: T.muted, marginTop: 4 }}>{timeAgo(n.createdAt)}</div>}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>,
+        document.body
+      )}
+    </>
+  );
+}
 
 // Faint ₹ coins that drift up behind the frosted glass, matching the landing.
 const AURORA_COINS = [
@@ -139,8 +222,14 @@ export function Aurora() {
 export function GlobalStyle() {
   return (
     <style>{`
-      .rex-app { ${cssVarsBlock(GLASS_VARS)} position: relative; min-height: 100vh; background: var(--rex-bg); transition: background 0.2s ease; }
-      [data-theme="dark"] .rex-app { ${cssVarsBlock(DARK_GLASS_VARS)} }
+      /* Theme variables live on :root (not just .rex-app) so anything
+         portaled straight into document.body — like the notification
+         panel, which has to escape the app bar's overflow:hidden — can
+         still resolve var(--rex-surface) etc. instead of falling back to
+         transparent/unstyled. */
+      :root { ${cssVarsBlock(GLASS_VARS)} }
+      [data-theme="dark"] { ${cssVarsBlock(DARK_GLASS_VARS)} }
+      .rex-app { position: relative; min-height: 100vh; background: var(--rex-bg); transition: background 0.2s ease; }
       .rex-app * { box-sizing: border-box; }
 
       .rex-aurora { position: fixed; inset: -25%; z-index: 0; filter: blur(72px); opacity: 0.16; pointer-events: none; }
@@ -298,7 +387,7 @@ const APPBAR_PULP = [
   { top: 55, size: 8, delay: 3.5, dur: 12 },
 ];
 
-export function AppBar({ userName, saveError, roomName, roomId, isAdmin, periodText, onLeave, onLogout, onOpenSettings, onOpenRoomInfo, theme, onToggleTheme }) {
+export function AppBar({ userName, saveError, roomName, roomId, isAdmin, periodText, onLeave, onLogout, onOpenSettings, onOpenRoomInfo, theme, onToggleTheme, notifications, onMarkAllNotificationsRead, onClearAllNotifications }) {
   return (
     <div className="rex-appbar">
       <div className="rex-appbar-juice" aria-hidden="true">
@@ -344,6 +433,9 @@ export function AppBar({ userName, saveError, roomName, roomId, isAdmin, periodT
             <button className="rex-theme-toggle" onClick={onToggleTheme} aria-label="Toggle dark mode" title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}>
               {theme === "dark" ? <Sun size={16} strokeWidth={2.2} /> : <Moon size={16} strokeWidth={2.2} />}
             </button>
+          )}
+          {notifications && (
+            <NotificationBell notifications={notifications} onMarkAllRead={onMarkAllNotificationsRead} onClearAll={onClearAllNotifications} />
           )}
           {onOpenSettings && (
             <button className="rex-theme-toggle" onClick={onOpenSettings} aria-label="My details" title="My details">

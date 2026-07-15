@@ -1,0 +1,11 @@
+{
+  "java.jdt.ls.java.home": "/home/ajish/.local/opt/jdk-21.0.11+10",
+  "java.configuration.runtimes": [
+    {
+      "name": "JavaSE-21",
+      "path": "/home/ajish/.local/opt/jdk-21.0.11+10",
+      "default": true
+    }
+  ],
+  "gradle.java.home": "/home/ajish/.local/opt/jdk-21.0.11+10"
+}
